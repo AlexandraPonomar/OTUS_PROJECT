@@ -1,162 +1,421 @@
 
 import re
-import joblib
 import pandas as pd
-import numpy as np
-import nltk
-
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+import matplotlib.pyplot as plt
+from IPython.core.display_functions import display
 
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import classification_report, f1_score
+from sklearn.svm import LinearSVC
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    classification_report,
+    ConfusionMatrixDisplay
+)
 
-# Один раз скачать данные для nltk
-nltk.download('stopwords')
-nltk.download('wordnet')
+# 1. НАСТРОЙКИ И ЗАГРУЗКА ДАННЫХ
 
-# Загрузка данных
-df = pd.read_excel("data/five treats.xlsx")  # или .csv
+RANDOM_STATE = 42
 
-print("Размер датасета:", df.shape)
-print("Колонки:", df.columns.tolist())
-print(df.head(3))
+TRAIT_MAPPING = {
+    0: "Openness",
+    1: "Conscientiousness",
+    2: "Extraversion",
+    3: "Agreeableness",
+    4: "Emotional_Stability"
+}
 
-# Предобработка текста
+TRAITS = list(TRAIT_MAPPING.values())
 
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
+df = pd.read_excel("data/five treats.xlsx")
 
-def preprocess(text):
-    # нижний регистр
-    text = str(text).lower()
-    # убрать пунктуацию и цифры
-    text = re.sub(r'[^a-z\s]', '', text)
-    # разделить слова на массив
-    words = text.split()
-    # убрать стоп-слова
-    words = [w for w in words if w not in stop_words]
-    # лемматизация
-    words = [lemmatizer.lemmatize(w) for w in words]
-    return " ".join(words)
+df = df.rename(columns={
+    "five treats": "label",
+    "context": "text"
+})
 
-df['clean_text'] = df['context'].apply(preprocess)
+print("Исходный размер:", df.shape)
 
-print("\nПример до/после:")
-print("ДО:  ", df['context'].iloc[0])
-print("ПОСЛЕ:", df['clean_text'].iloc[0])
+# 2. ОЧИСТКА ДАННЫХ
 
-# Создаём пять бинарных колонок из мультиклассовой разметки
-df['Openness'] = (df['five treats'] == 0).astype(int)
-df['Conscientiousness'] = (df['five treats'] == 1).astype(int)
-df['Extraversion'] = (df['five treats'] == 2).astype(int)
-df['Agreeableness'] = (df['five treats'] == 3).astype(int)
-df['Emotional_Stability'] = (df['five treats'] == 4).astype(int)
+print("\nПропущенные значения:")
+print(df.isna().sum())
 
-# Проверяем, что получилось
-print("Новые колонки:", df.columns.tolist())
-print(df[['five treats', 'Openness', 'Conscientiousness', 'Extraversion', 'Agreeableness', 'Emotional_Stability']].head(10))
+df["label"] = pd.to_numeric(
+    df["label"],
+    errors="coerce"
+)
 
-# Функция для обучения и оценки одной модели
-
-def train_and_evaluate(texts, labels, model_name, classifier):
-    # 1. Разделение на train/test — ЗДЕСЬ создаются X_train, X_test, y_train, y_test
-    X_train, X_test, y_train, y_test = train_test_split(
-        texts, labels,
-        test_size=0.2,
-        random_state=42,
-        stratify=labels
-    )
-
-    # 2. Pipeline
-    pipeline = Pipeline([
-        ('tfidf', TfidfVectorizer(max_features=5000, ngram_range=(1, 2))),
-        ('clf', classifier)
-    ])
-
-    # 3. Обучение
-    pipeline.fit(X_train, y_train)
-
-    # 4. Предсказание
-    y_pred = pipeline.predict(X_test)
-
-    # 5. Метрики
-    print(classification_report(y_test, y_pred, zero_division=0))
-    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-
-    return pipeline, f1
-
-
-# Обучение моделей по каждой черте
-
-traits = [
-    'Openness',
-    'Conscientiousness',
-    'Extraversion',
-    'Agreeableness',
-    'Emotional_Stability'
+# Проверяем неизвестные метки
+invalid_rows = df[
+    df["label"].notna()
+    & ~df["label"].isin(TRAIT_MAPPING)
 ]
-results = {}   # сюда сложим лучшие модели и метрики
 
-for trait in traits:
-    print(f"# ЧЕРТА: {trait}")
+print("\nСтроки с неизвестными метками:")
+display(invalid_rows)
 
-    # Проверяем, что колонка существует
-    if trait not in df.columns:
-        print(f" Колонка '{trait}' не найдена. Пропускаем.")
-        continue
+# Удаляем пропуски и неизвестные классы
+df = df.dropna(subset=["text", "label"]).copy()
+df = df[df["label"].isin(TRAIT_MAPPING)].copy()
+df["label"] = df["label"].astype(int)
 
-    X = df['clean_text']
-    y = df[trait]
+# 3. ПРЕДОБРАБОТКА ТЕКСТА
 
-    # Logistic Regression
-    lr_pipeline, lr_f1 = train_and_evaluate(
-        X, y, "Logistic Regression",
-        LogisticRegression(max_iter=1000, class_weight='balanced')
+def clean_text(text):
+    text = str(text).lower()
+
+    # Удаление URL
+    text = re.sub(
+        r"https?://\S+|www\.\S+", " ", text
     )
 
-    # Random Forest
-    rf_pipeline, rf_f1 = train_and_evaluate(
-        X, y, "Random Forest",
-        RandomForestClassifier(n_estimators=100, random_state=42)
+    # Удаление HTML-тегов
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # Удаление пунктуации и спецсимволов
+    text = re.sub(r"[^a-z\s']", " ", text)
+
+    # Удаление лишних пробелов
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+df["text_clean"] = df["text"].apply(clean_text)
+df = df[df["text_clean"].str.len() > 0].copy()
+
+# 4. СОЗДАНИЕ ПЯТИ БИНАРНЫХ КОЛОНОК
+
+for class_id, trait in TRAIT_MAPPING.items():
+    df[trait] = (df["label"] == class_id).astype(int)
+
+assert (df[TRAITS].sum(axis=1) == 1).all()
+assert df[TRAITS].isin([0, 1]).all().all()
+
+print("\nПример бинарной разметки:")
+display(df[["text_clean"] + TRAITS].head())
+
+# 5. ПРОВЕРКА И УДАЛЕНИЕ ДУБЛИКАТОВ
+
+print("\nКоличество дубликатов:")
+print(df["text_clean"].duplicated().sum())
+
+conflicts = (
+    df.groupby("text_clean")["label"]
+    .nunique()
+)
+
+if (conflicts > 1).any():
+    raise ValueError(
+        "Обнаружены одинаковые тексты с разными метками"
     )
 
-    # Выбираем лучшую модель для этой черты
-    if lr_f1 >= rf_f1:
-        best_model, best_name, best_f1 = lr_pipeline, "Logistic Regression", lr_f1
-    else:
-        best_model, best_name, best_f1 = rf_pipeline, "Random Forest", rf_f1
+df = df.drop_duplicates(
+    subset="text_clean"
+).reset_index(drop=True)
 
-    results[trait] = {
-        'model': best_model,
-        'name': best_name,
-        'f1': best_f1
-    }
+print("Размер после очистки:", df.shape)
 
-    print(f"\n Лучшая модель для '{trait}': {best_name} (F1={best_f1:.4f})")
 
-# Итоговая таблица результатов
+# 6. АНАЛИЗ РАСПРЕДЕЛЕНИЯ КЛАССОВ
 
-print("ИТОГОВАЯ ТАБЛИЦА РЕЗУЛЬТАТОВ")
+class_distribution = df[TRAITS].sum()
 
-summary = pd.DataFrame([
-    {'Черта': trait, 'Лучшая модель': res['name'], 'F1 (weighted)': round(res['f1'], 4)}
-    for trait, res in results.items()
-])
-print(summary.to_string(index=False))
+print("\nРаспределение классов:")
+display(class_distribution.to_frame("Количество"))
 
-# Сохранение лучших моделей
+class_distribution.plot(
+    kind="bar",
+    figsize=(11, 5),
+    title="Распределение Big Five"
+)
 
-import os
-os.makedirs('models', exist_ok=True)
+plt.xlabel("Черта личности")
+plt.ylabel("Количество предложений")
+plt.xticks(rotation=30, ha="right")
+plt.tight_layout()
+plt.show()
 
-for trait, res in results.items():
-    filename = f"models/{trait}_best.joblib"
-    joblib.dump(res['model'], filename)
-    print(f"Сохранено: {filename}")
+# 7. РАЗДЕЛЕНИЕ TRAIN / VALIDATION / TEST
 
-print("\n Готово!")
+if df["label"].value_counts().min() < 5:
+    raise ValueError(
+        "Слишком мало примеров для стратификации"
+    )
+
+train_df, temp_df = train_test_split(
+    df,
+    test_size=0.4,
+    stratify=df["label"],
+    random_state=RANDOM_STATE
+)
+
+val_df, test_df = train_test_split(
+    temp_df,
+    test_size=0.5,
+    stratify=temp_df["label"],
+    random_state=RANDOM_STATE
+)
+
+print("\nРазмеры выборок:")
+print("Train:", train_df.shape)
+print("Validation:", val_df.shape)
+print("Test:", test_df.shape)
+
+# 8. ПОДГОТОВКА ПРИЗНАКОВ И МЕТОК
+
+X_train = train_df["text_clean"]
+X_val = val_df["text_clean"]
+X_test = test_df["text_clean"]
+
+# Одна целевая колонка с пятью классами
+y_train = train_df["label"]
+y_val = val_df["label"]
+y_test = test_df["label"]
+
+# 9. TF-IDF ВЕКТОРИЗАЦИЯ
+
+tfidf = TfidfVectorizer(
+    max_features=10000,
+    ngram_range=(1, 2),
+    min_df=1,
+    sublinear_tf=True
+)
+
+# Обучаем TF-IDF только на Train
+X_train_tfidf = tfidf.fit_transform(X_train)
+
+# Применяем к Validation и Test
+X_val_tfidf = tfidf.transform(X_val)
+X_test_tfidf = tfidf.transform(X_test)
+
+print("\nРазмеры TF-IDF матриц:")
+print("Train:", X_train_tfidf.shape)
+print("Validation:", X_val_tfidf.shape)
+print("Test:", X_test_tfidf.shape)
+
+# 10. СОЗДАНИЕ ДВУХ МОДЕЛЕЙ
+
+models = {
+    "Logistic Regression": LogisticRegression(
+        max_iter=2000,
+        class_weight="balanced",
+        random_state=RANDOM_STATE
+    ),
+    "Linear SVM": LinearSVC(
+        class_weight="balanced",
+        max_iter=5000,
+        random_state=RANDOM_STATE
+    )
+}
+
+# 11. ОБУЧЕНИЕ И ОЦЕНКА НА VALIDATION
+
+results = []
+
+for name, model in models.items():
+
+    print(f"\nОбучение: {name}")
+
+    model.fit(X_train_tfidf, y_train)
+
+    y_pred = model.predict(X_val_tfidf)
+
+    results.append({
+        "Model": name,
+        "Accuracy": accuracy_score(y_val, y_pred),
+        "Precision": precision_score(
+            y_val, y_pred,
+            average="macro",
+            zero_division=0
+        ),
+        "Recall": recall_score(
+            y_val, y_pred,
+            average="macro",
+            zero_division=0
+        ),
+        "F1": f1_score(
+            y_val, y_pred,
+            average="macro",
+            zero_division=0
+        )
+    })
+
+    print(classification_report(
+        y_val,
+        y_pred,
+        labels=list(TRAIT_MAPPING),
+        target_names=TRAITS,
+        zero_division=0
+    ))
+
+# 12. СРАВНЕНИЕ ДВУХ МОДЕЛЕЙ
+
+results_df = pd.DataFrame(results)
+
+results_df = results_df.sort_values(
+    by="F1",
+    ascending=False
+)
+
+print("\nИтоговое сравнение моделей:")
+display(results_df.round(3))
+
+results_df.set_index("Model")[
+    ["Accuracy", "Precision", "Recall", "F1"]
+].plot(
+    kind="bar",
+    figsize=(10, 5)
+)
+
+plt.title("Сравнение моделей Big Five")
+plt.ylabel("Значение метрики")
+plt.ylim(0, 1)
+plt.xticks(rotation=0)
+plt.tight_layout()
+plt.show()
+
+# 13. ВЫБОР ЛУЧШЕЙ МОДЕЛИ
+
+best_model_name = results_df.iloc[0]["Model"]
+best_model = models[best_model_name]
+
+print("\nЛучшая модель:", best_model_name)
+
+# 14. ФИНАЛЬНОЕ ТЕСТИРОВАНИЕ
+
+y_test_pred = best_model.predict(X_test_tfidf)
+
+print("\nРезультаты на Test:")
+print(classification_report(
+    y_test,
+    y_test_pred,
+    labels=list(TRAIT_MAPPING),
+    target_names=TRAITS,
+    zero_division=0
+))
+
+ConfusionMatrixDisplay.from_predictions(
+    y_test,
+    y_test_pred,
+    labels=list(TRAIT_MAPPING),
+    display_labels=TRAITS,
+    xticks_rotation=45,
+    cmap="Blues"
+)
+
+plt.title(f"Confusion Matrix — {best_model_name}")
+plt.tight_layout()
+plt.show()
+
+
+# 15. ТАБЛИЦА ПРЕДСКАЗАНИЙ
+
+
+predictions_df = test_df[
+    ["text", "label"]
+].copy()
+
+predictions_df["predicted_label"] = y_test_pred
+
+predictions_df["actual_trait"] = (
+    predictions_df["label"].map(TRAIT_MAPPING)
+)
+
+predictions_df["predicted_trait"] = (
+    predictions_df["predicted_label"].map(TRAIT_MAPPING)
+)
+
+predictions_df["correct"] = (
+    predictions_df["label"]
+    == predictions_df["predicted_label"]
+)
+
+#Создаём пять бинарных колонок
+for class_id, trait in TRAIT_MAPPING.items():
+    predictions_df[trait] = (
+        predictions_df["predicted_label"] == class_id
+    ).astype(int)
+
+#Настраиваем отображение
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_colwidth", 100)
+
+#Выбираем и упорядочиваем колонки
+display_columns = [
+    "text",
+    "actual_trait",
+    "predicted_trait",
+    "correct"
+] + TRAITS
+
+#Подсвечиваем правильные и ошибочные предсказания
+styled_predictions = (
+    predictions_df[display_columns]
+    .head(20)
+    .style
+    .map(
+        lambda x: (
+            "background-color: #d4edda; color: #155724"
+            if x else
+            "background-color: #f8d7da; color: #721c24"
+        ),
+        subset=["correct"]
+    )
+    .format({"text": lambda x: x[:100] + "..." if len(x) > 100 else x})
+)
+
+print("\nПримеры предсказаний:")
+
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_colwidth", 100)
+pd.set_option("display.width", 200)
+
+display(predictions_df.head(15))
+
+display(styled_predictions)
+
+# 16. СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+
+df.to_csv(
+    "five_traits_preprocessed.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+train_df.to_csv(
+    "five_traits_train.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+val_df.to_csv(
+    "five_traits_validation.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+test_df.to_csv(
+    "five_traits_test.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+results_df.to_csv(
+    "five_traits_model_comparison.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+predictions_df.to_csv(
+    "five_traits_predictions.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+print("\nОбучение и тестирование завершены!")
