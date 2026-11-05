@@ -1,7 +1,11 @@
 
 import re
+
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk
 from IPython.core.display_functions import display
 
 from sklearn.model_selection import train_test_split
@@ -14,7 +18,7 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
     classification_report,
-    ConfusionMatrixDisplay
+    ConfusionMatrixDisplay, confusion_matrix
 )
 
 # 1. НАСТРОЙКИ И ЗАГРУЗКА ДАННЫХ
@@ -264,19 +268,56 @@ results_df = results_df.sort_values(
 )
 
 print("\nИтоговое сравнение моделей:")
-display(results_df.round(3))
+print(results_df.round(3).to_string(index=False))
 
-results_df.set_index("Model")[
-    ["Accuracy", "Precision", "Recall", "F1"]
-].plot(
-    kind="bar",
-    figsize=(10, 5)
+metrics = ["Accuracy", "Precision", "Recall", "F1"]
+
+lr = results_df.set_index("Model").loc[
+    "Logistic Regression", metrics
+].astype(float)
+
+svm = results_df.set_index("Model").loc[
+    "Linear SVM", metrics
+].astype(float)
+
+y = np.arange(len(metrics))
+height = 0.35
+
+fig, ax = plt.subplots(figsize=(11, 6))
+
+bars_lr = ax.barh(
+    y - height / 2,
+    lr.values,
+    height,
+    label="Logistic Regression",
+    color="steelblue"
 )
 
-plt.title("Сравнение моделей Big Five")
-plt.ylabel("Значение метрики")
-plt.ylim(0, 1)
-plt.xticks(rotation=0)
+bars_svm = ax.barh(
+    y + height / 2,
+    svm.values,
+    height,
+    label="Linear SVM",
+    color="darkorange"
+)
+
+# Подписываем значения непосредственно на графике
+ax.bar_label(bars_lr, fmt="%.3f", padding=4)
+ax.bar_label(bars_svm, fmt="%.3f", padding=4)
+
+ax.set_yticks(y)
+ax.set_yticklabels(metrics)
+
+# Увеличиваем масштаб для лучшей видимости
+ax.set_xlim(0.25, 0.55)
+
+ax.set_xlabel("Значение метрики")
+ax.set_title("Сравнение моделей Big Five")
+
+ax.legend()
+ax.grid(axis="x", alpha=0.2)
+ax.set_axisbelow(True)
+
 plt.tight_layout()
 plt.show()
 
@@ -309,7 +350,7 @@ ConfusionMatrixDisplay.from_predictions(
     cmap="Blues"
 )
 
-plt.title(f"Confusion Matrix — {best_model_name}")
+plt.title(f"Матрица ошибок — {best_model_name}")
 plt.tight_layout()
 plt.show()
 
@@ -419,3 +460,199 @@ predictions_df.to_csv(
 )
 
 print("\nОбучение и тестирование завершены!")
+
+# 17. МАТРИЦА ОШИБОК LOGISTIC REGRESSION
+
+labels = list(TRAIT_MAPPING.keys())
+trait_names = list(TRAIT_MAPPING.values())
+
+# Используем уже полученные предсказания Test
+cm = confusion_matrix(
+    y_test,
+    y_test_pred,
+    labels=labels
+)
+
+# Таблица с количеством предсказаний
+cm_df = pd.DataFrame(
+    cm,
+    index=trait_names,
+    columns=trait_names
+)
+
+print("Матрица ошибок:")
+display(cm_df)
+
+# Визуализация
+fig, ax = plt.subplots(figsize=(10, 7))
+
+disp = ConfusionMatrixDisplay(
+    confusion_matrix=cm,
+    display_labels=trait_names
+)
+
+disp.plot(
+    ax=ax,
+    cmap="Blues",
+    values_format="d",
+    colorbar=False
+)
+
+plt.xticks(rotation=45, ha="right")
+plt.title("Матрица ошибок логистической регрессии — Big Five")
+plt.tight_layout()
+plt.show()
+
+# 18. НОРМАЛИЗОВАННАЯ МАТРИЦА ОШИБОК
+
+cm_normalized = confusion_matrix(
+    y_test,
+    y_test_pred,
+    labels=labels,
+    normalize="true"
+)
+
+fig, ax = plt.subplots(figsize=(10, 7))
+
+disp = ConfusionMatrixDisplay(
+    confusion_matrix=cm_normalized,
+    display_labels=trait_names
+)
+
+disp.plot(
+    ax=ax,
+    cmap="Blues",
+    values_format=".2f",
+    colorbar=False
+)
+
+plt.xticks(rotation=45, ha="right")
+plt.title("Нормализованная матрица ошибок — Big Five")
+plt.tight_layout()
+plt.show()
+
+# 19. АНАЛИЗ САМЫХ ЧАСТЫХ ОШИБОК
+
+errors = []
+
+for actual_id in labels:
+    for predicted_id in labels:
+
+        if actual_id == predicted_id:
+            continue
+
+        count = cm[actual_id, predicted_id]
+
+        if count > 0:
+            errors.append({
+                "Actual": TRAIT_MAPPING[actual_id],
+                "Predicted": TRAIT_MAPPING[predicted_id],
+                "Errors": count
+            })
+
+errors_df = pd.DataFrame(errors)
+
+if not errors_df.empty:
+    errors_df = errors_df.sort_values(
+        "Errors",
+        ascending=False
+    )
+
+    display(errors_df)
+else:
+    print("Ошибок классификации не обнаружено.")
+
+
+
+
+
+# ОТДЕЛЬНОЕ ОКНО С ОШИБКАМИ КЛАССИФИКАЦИИ
+
+wrong_predictions = predictions_df[
+    ~predictions_df["correct"]
+].copy()
+
+def show_errors_window(errors_df):
+    root = tk.Tk()
+    root.title("Big Five — Ошибки классификации")
+    root.geometry("1250x650")
+
+    # Заголовок
+    title_label = ttk.Label(
+        root,
+        text=f"Ошибочные предсказания: {len(errors_df)}",
+        font=("Arial", 14, "bold")
+    )
+    title_label.pack(pady=15)
+
+    # Контейнер таблицы
+    frame = ttk.Frame(root)
+    frame.pack(
+        fill=tk.BOTH,
+        expand=True,
+        padx=10,
+        pady=10
+    )
+
+    columns = (
+        "text",
+        "actual_trait",
+        "predicted_trait"
+    )
+
+    tree = ttk.Treeview(
+        frame,
+        columns=columns,
+        show="headings"
+    )
+
+    tree.heading("text", text="Предложение")
+    tree.heading("actual_trait", text="Реальная черта")
+    tree.heading("predicted_trait", text="Предсказанная черта")
+
+    tree.column("text", width=750, anchor="w")
+    tree.column("actual_trait", width=200, anchor="center")
+    tree.column("predicted_trait", width=200, anchor="center")
+
+    # Вертикальная прокрутка
+    scrollbar_y = ttk.Scrollbar(
+        frame,
+        orient=tk.VERTICAL,
+        command=tree.yview
+    )
+
+    # Горизонтальная прокрутка
+    scrollbar_x = ttk.Scrollbar(
+        frame,
+        orient=tk.HORIZONTAL,
+        command=tree.xview
+    )
+
+    tree.configure(
+        yscrollcommand=scrollbar_y.set,
+        xscrollcommand=scrollbar_x.set
+    )
+
+    tree.grid(row=0, column=0, sticky="nsew")
+    scrollbar_y.grid(row=0, column=1, sticky="ns")
+    scrollbar_x.grid(row=1, column=0, sticky="ew")
+
+    frame.rowconfigure(0, weight=1)
+    frame.columnconfigure(0, weight=1)
+
+    # Добавляем ошибочные предсказания
+    for _, row in errors_df.iterrows():
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                row["text"],
+                row["actual_trait"],
+                row["predicted_trait"]
+            )
+        )
+
+    root.mainloop()
+
+
+show_errors_window(wrong_predictions)
